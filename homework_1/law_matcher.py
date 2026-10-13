@@ -29,6 +29,7 @@ except ImportError:
 
 _DATA_FILE = Path(__file__).resolve().with_name("law_aliases.json")
 _LOCK = Lock()
+_MAX_LAW_TEXT = 1500  # самое длинное название в базе около 400 символов; длиннее — мусор
 _INDEX: dict[str, set[int]] | None = None
 _EXACT_INDEX: dict[str, set[int]] | None = None
 _MORPH = None
@@ -42,7 +43,7 @@ _QTITLE = re.compile(r'["«]([^"»«]{2,})["»]')
 _LEGAL_PREFIX = re.compile(r"^(?:(?:федеральн(?:ый|ого|ому|ым|ом)|фз|ф\s*з)\s+)?(?:закон(?:а|у|ом|е)?|федеральн(?:ый|ого|ому|ым|ом)\s+закон(?:а|у|ом|е)?)\s+", re.IGNORECASE)
 
 
-_ACT_NUMBER = re.compile(r"(?<![\d.])(\d{1,4})\s*-?\s*(фкз|фз|кз|з|[ivx]+)(?![а-яa-z0-9])", re.IGNORECASE)
+_ACT_NUMBER = re.compile(r"(?<![\d.])(\d{1,4})\s*-?\s*(фкз|фз|кз|з|[ivx]+|(?<=-)1)(?![а-яa-z0-9])", re.IGNORECASE)
 _DATE_NUM = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
 _DATE_WORDS = re.compile(r"(\d{1,2})\s+([а-я]+)\s+(\d{4})", re.IGNORECASE)
 _MONTHS = {m: i for i, m in enumerate(
@@ -52,7 +53,7 @@ _MONTHS = {m: i for i, m in enumerate(
 def _act_numbers(text: str) -> list[str]:
     """Номера актов вида 152-ФЗ, 'N 152 ФЗ', '№ 2300-I' -> ['152-ФЗ', ...]."""
     cleaned = _DATE_NUM.sub(" ", text.replace("№", " "))
-    return [f"{n}-{suffix.upper()}" for n, suffix in _ACT_NUMBER.findall(cleaned)]
+    return [f"{n}-{'I' if suffix == '1' else suffix.upper()}" for n, suffix in _ACT_NUMBER.findall(cleaned)]
 
 
 def _act_date(text: str) -> str:
@@ -219,6 +220,8 @@ def find_law(law_text: Optional[str]) -> Optional[int]:
     ("№ 580-ФЗ"), date and quoted title are used.
     """
     law_id = _find_by_name(law_text)
+    if law_id is None and isinstance(law_text, str) and len(law_text.split()) == 1:
+        law_id = _find_by_name(law_text.strip() + " РФ")   # "КоАП" -> "КоАП РФ"
     if law_id is None and isinstance(law_text, str):
         try:
             return _find_by_number(law_text)
@@ -234,7 +237,7 @@ def _find_by_name(law_text: Optional[str]) -> Optional[int]:
     Ambiguous normalized aliases are deliberately rejected.
     """
     try:
-        if not isinstance(law_text, str) or not law_text.strip():
+        if not isinstance(law_text, str) or not law_text.strip() or len(law_text) > _MAX_LAW_TEXT:
             return None
         if _INDEX is None:
             initialize()

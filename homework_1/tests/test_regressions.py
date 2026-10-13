@@ -92,3 +92,77 @@ def test_law_text_covers_non_code_acts(text, law_id):
 def test_numbers_inside_law_title_are_not_links():
     links = extract_links("ст. 332 ФЗ «О введении в действие части четвертой Гражданского кодекса Российской Федерации»")
     assert len(links) == 1 and links[0].article == "332"
+
+
+# ----------------------------------------------------------- закон по контексту
+def test_anaphora_takes_previous_act():
+    text = ("ст. 10 Федерального закона от 29.12.2022 № 580-ФЗ. "
+            "Разрешение выдаётся по статье 20 настоящего Федерального закона.")
+    first, second = extract_links(text)
+    assert second.law_text == first.law_text
+
+
+def test_anaphora_code_vs_act_kind():
+    text = "ст. 5 УК РФ, ст. 7 Федерального закона № 3-ФЗ, а также ст. 9 названного Кодекса"
+    links = extract_links(text)
+    assert links[-1].law_text == "УК РФ"
+
+
+def test_anaphora_without_antecedent_is_none():
+    (r,) = extract_links("по статье 20 настоящего Федерального закона")
+    assert r.law_text is None
+
+
+def test_law_named_on_the_left_same_sentence():
+    (r,) = extract_links("Согласно УК РФ преступлением признаётся деяние, указанное в статье 105.")
+    assert r.law_text == "УК РФ"
+
+
+def test_left_law_not_taken_across_sentence_break():
+    (r,) = extract_links("Применён УК РФ. Далее суд сослался на статью 105.")
+    assert r.law_text is None
+
+
+def test_left_law_not_taken_for_weak_words():
+    (r,) = extract_links("положения ст. 155")
+    assert r.law_text is None
+
+
+def test_period_between_levels():
+    (r,) = extract_links("п.2.2. ст.11 ФЗ РФ №27-ФЗ")
+    assert (r.article, r.point) == ("11", "2.2")
+
+
+def test_pp_quoted_letters_with_two_parts():
+    links = extract_links("п.п «и», «к» ч. 1 и ч. 2 ст. 61 УК РФ")
+    assert [(r.article, r.point, r.subpoint) for r in links] == [
+        ("61", "1", "«и», «к»"), ("61", "2", None)]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("частью 3 пункта 2 статьи 3 НК РФ", ("3", "2", "3")),   # часть внутри пункта
+    ("ст. 3 ч. 2 п. 5 НК РФ", ("3", "2", "5")),               # пункт внутри части
+])
+def test_part_and_point_order(text, expected):
+    (r,) = extract_links(text)
+    assert (r.article, r.point, r.subpoint) == expected
+
+
+def test_numbers_in_quoted_act_title_ignored_without_link():
+    links = extract_links("Постановление № 9 «О некоторых вопросах введения в действие части первой Налогового кодекса» ст. 5 НК РФ")
+    assert [r.article for r in links] == ["5"]
+
+
+def test_find_law_bare_code_abbr():
+    assert find_law("КоАП") == 17
+
+
+def test_adversarial_inputs_are_fast():
+    import time
+    import main
+    texts = ["ст. 5 НК РФ. " * 20000, "ст. 5 ПОЛОЖЕНИЕ " + "А " * 20000,
+             "ст. 5 Закона «" + "а" * 50000, "ст. 5" + " " * 50000 + "НК РФ"]
+    start = time.time()
+    for t in texts:
+        main.detect_links(t)
+    assert time.time() - start < 20

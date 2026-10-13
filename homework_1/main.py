@@ -1,4 +1,4 @@
-import os
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
@@ -12,12 +12,9 @@ from law_matcher import find_law
 from link_extractor import extract_links
 from number_parser import expand
 
-ALIASES_PATH = Path(__file__).resolve().with_name("law_aliases.json")
+logger = logging.getLogger("law_links")
 
-# Ссылки, закон которых не определён (нет в базе, назван нестандартно), по умолчанию
-# не возвращаются: «лучше пропустить, чем ошибиться». RETURN_UNRESOLVED_LAWS=1 возвращает
-# их с law_id=null.
-RETURN_UNRESOLVED_LAWS = os.getenv("RETURN_UNRESOLVED_LAWS", "0") == "1"
+ALIASES_PATH = Path(__file__).resolve().with_name("law_aliases.json")
 
 
 class LawLink(BaseModel):
@@ -38,24 +35,25 @@ class TextRequest(BaseModel):
 def detect_links(text: str) -> List[LawLink]:
     """
     Конвейер: extract_links -> find_law -> expand.
-    Без закона ссылка возвращается только при RETURN_UNRESOLVED_LAWS.
+    Ссылки, закон которых не определён (нет в базе, назван нестандартно), пропускаются:
+    лучше пропустить, чем ошибиться.
     Ошибка на одной ссылке не роняет весь запрос: такая ссылка пропускается.
     """
     links: List[LawLink] = []
     try:
         raw_links = extract_links(text)
     except Exception as exc:
-        print(f"extract_links: {exc!r}")
+        logger.exception("extract_links failed")
         return links
 
     for raw in raw_links:
         try:
             law_id = find_law(raw.law_text)
-            if law_id is None and not RETURN_UNRESOLVED_LAWS:
+            if law_id is None:
                 continue
             links.extend(expand(raw, law_id))
         except Exception as exc:
-            print(f"Ссылка {raw!r} пропущена: {exc!r}")
+            logger.warning("Ссылка %r пропущена: %r", raw, exc)
     return links
 
 
@@ -63,10 +61,10 @@ def detect_links(text: str) -> List[LawLink]:
 async def lifespan(app: FastAPI):
     # Startup: индекс алиасов строится один раз, а не на каждый запрос
     law_matcher.initialize(ALIASES_PATH)
-    print("🚀 Сервис запускается...")
+    logger.info("Сервис запускается")
     yield
     # Shutdown
-    print("🛑 Сервис завершается...")
+    logger.info("Сервис завершается")
 
 
 app = FastAPI(

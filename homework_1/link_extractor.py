@@ -39,7 +39,7 @@ _NUM = rf"(?:\d+(?:\.\d+)*(?:\s*[-–—]\s*\d+(?:\.\d+)*)?|{ORDINAL_WORDS})"
 VALUE_NUM = rf"{_NUM}(?:\s*(?:,|и)\s*{_NUM})*"
 #   - буквы: "а", "а, б", "а, б и с". Буква должна стоять отдельно:
 #     "пункте меню" — не пункт "м", "п. п." — не пункт "п"; допустимы кавычки: п. «б»
-_LETTER = rf"(?!(?:п|ч|ст|пп)\.)[\"«“„]?[а-яё][\"»”]?{_WORD_END}"
+_LETTER = rf"(?!(?:п|ч|ст|пп)\.)(?![пч](?![а-яё]))[\"«“„]?[а-яё][\"»”]?{_WORD_END}"
 VALUE_LET = rf"{_LETTER}(?:\s*(?:,|и)\s*{_LETTER})*"
 VALUE = rf"(?:{VALUE_NUM}|{VALUE_LET})"
 
@@ -82,19 +82,23 @@ LAW_ADJ = r"(?i:[а-яё]+(?:-[а-яё]+)?(?:ого|его|ому|ему|ый|и
 RF = r"(?i:РФ|Российской\s+Федерации|России)(?![А-Яа-яёЁ])"
 
 # Номер акта: "№20-456", "№ 152-ФЗ"
-LAW_NUMBER = r"(?:(?:№|N)\s*\d[\w/\-]*|\d+-(?:ФКЗ|ФЗ|КЗ|З))"
+LAW_NUMBER = r"(?:(?:№|N)\s*\d[\w/\-]*(?:\s+(?:ФКЗ|ФЗ|КЗ)(?![А-Яа-яё]))?|\d+-(?:ФКЗ|ФЗ|КЗ|З))"
 
 # Дата акта: "от 01.04.1996", "от 1 апреля 1996 года"
-LAW_DATE = (r"от\s+\d{1,2}(?:\.\d{1,2}\.\d{2,4}"
-            r"|\s+(?i:[а-яё]+)\s+\d{4}(?:\s+(?i:года|г\.))?)")
+LAW_DATE = (r"(?:от(?=\s+(?:№|N))|от\s+(?:ДД\.ММ\.ГГГГ|\d{1,2}(?:\.\d{1,2}\.\d{2,4}(?:\s*г\.)?"
+            r"|\s+(?i:[а-яё]+)\s+\d{4}(?:\s+(?i:года|г\.))?)))")
 
 # Название в кавычках
-QUOTED = r"(?:«[^»\n]{1,300}»|\"[^\"\n]{1,300}\"|“[^”\n]{1,300}”)"
+QUOTED = r"(?:«[^»\n]{1,300}(?:»|\Z)|\"[^\"\n]{1,300}(?:\"|\Z)|“[^”\n]{1,300}(?:”|\Z))"
 
 ACT_SLASH_NUMBER = r"\d{1,3}/\d{2,4}"      # ПБУ 9/99, ФСБУ 28/2023
+ACT_NOTE = r"(?:\s*\((?:ПБУ|ФСБУ|в\s+ред\.)[^)\n]{1,250}\))?"   # (ПБУ 11/2008), (в ред. Приказа …)
 _CAPS_BEFORE_QUOTE = rf"(?:(?:\s+[А-ЯЁ]{{3,}}){{1,4}}(?=\s+{QUOTED}))?"   # ФСБУ ГОСУДАРСТВЕННЫХ ФИНАНСОВ "…"
+# "Закона о пожарной безопасности": лишние слова в конце отсекает law_matcher
+LAW_UNQUOTED_TITLE = r"(?:\s+(?:о|об)\s+[а-яё]+(?:\s+(?:и\s+)?[а-яё]{3,}){0,3})"
 _LAW_TAIL = (rf"(?:\s+{RF})?(?:\s+{LAW_DATE})?(?:\s*{LAW_NUMBER}|\s+{ACT_SLASH_NUMBER})?"
-             rf"(?:\s+{LAW_DATE})?{_CAPS_BEFORE_QUOTE}(?:\s+{QUOTED})?")
+             rf"(?:\s+{LAW_DATE})?{_CAPS_BEFORE_QUOTE}(?:\s+{QUOTED}{ACT_NOTE})?")
+_LAW_TAIL_TITLED = rf"{_LAW_TAIL}(?:{LAW_UNQUOTED_TITLE})?"
 
 # Известные сокращения кодексов принимаются и в нижнем регистре: "ук рф"
 LAW_ABBR_LOWER = (r"(?i:(?:ук|нк|гк|тк|ск|жк|зк|бк|апк|гпк|упк|кас|коап|грк|вк|уик)(?![а-яё]))"
@@ -107,16 +111,17 @@ LAW_POST = (r"(?:\s+(?i:Президента|Правительства)(?:\s+" 
             r"|(?:\s+(?i:Российской\s+Федерации|РФ))?\s+(?i:об?)\s+(?i:[а-яё]+ых)\s+(?i:[а-яё]+ях)(?![а-яё]))?")
 
 # Стандарты бухучёта пишутся прописными: ПОЛОЖЕНИЕ ПО БУХГАЛТЕРСКОМУ УЧЕТУ ПБУ 7/98 "…"
-ACCOUNTING_ACT = (rf"(?:ПОЛОЖЕНИЕ|ФЕДЕРАЛЬНЫЙ\s+СТАНДАРТ)(?:\s+[А-ЯЁ]{{2,}}|\s*\([^)\n]{{1,40}}\)"
-                  rf"|\s+{ACT_SLASH_NUMBER})+(?:\s+{QUOTED})?")
+ACCOUNTING_ACT = (rf"(?:ПОЛОЖЕНИЕ|ФЕДЕРАЛЬНЫЙ\s+СТАНДАРТ)(?:\s+[А-ЯЁ]+|\s*\([^)\n]{{1,40}}\)"
+                  rf"|\s+{ACT_SLASH_NUMBER})+(?:\s+{QUOTED})?{ACT_NOTE}")
 
 RE_LAW = re.compile(
     rf"(?:"
     rf"{ACCOUNTING_ACT}|"
-    rf"(?:{LAW_ADJ}\s+){{0,4}}{LAW_HEAD}{LAW_POST}{_LAW_TAIL}"
+    rf"(?:{LAW_ADJ}\s+){{0,4}}{LAW_HEAD}{LAW_POST}{_LAW_TAIL_TITLED}"
     rf"|{LAW_ABBR}{_LAW_TAIL}"
     rf"|{LAW_ABBR_LOWER}"
-    rf"|{QUOTED}"
+    rf"|{QUOTED}{ACT_NOTE}"
+    rf"|\((?:ПБУ|ФСБУ)\s+{ACT_SLASH_NUMBER}\){ACT_NOTE}"
     rf")"
 )
 
@@ -143,6 +148,8 @@ class _Anchor:
 _KIND_RANK = {"article": 3, "point": 2, "subpoint": 1}
 
 # Поиск якорей
+RE_TITLE_SPAN = re.compile(r"«О(?:б|\s)[^»\n]{3,300}»|\"О(?:б|\s)[^\"\n]{3,300}\"")
+
 def _find_anchors(text: str) -> list[_Anchor]:
     anchors: list[_Anchor] = []
 
@@ -154,6 +161,10 @@ def _find_anchors(text: str) -> list[_Anchor]:
 
     for m in RE_ARTICLE.finditer(text):
         anchors.append(_Anchor("article", m.group("val"), m.start(), m.end(), m.group("tok")))
+
+    # номера внутри названий актов в кавычках — часть названия
+    titles = [(m.start(), m.end()) for m in RE_TITLE_SPAN.finditer(text)]
+    anchors = [a for a in anchors if not any(s < a.start < e for s, e in titles)]
 
     # убрать пересечения
     anchors.sort(key=lambda a: (a.start, -_KIND_RANK[a.kind]))
@@ -169,7 +180,7 @@ def _find_anchors(text: str) -> list[_Anchor]:
 
 # Группировка якорей в ссылки
 # Между двумя якорями допускаем только разделители, чтобы считать их одной ссылкой
-RE_SEPARATOR_BETWEEN_LEVELS = re.compile(r"^[\s,;]*(?:(?:и|или|в)\s+)?[\s,;]*$", re.IGNORECASE)
+RE_SEPARATOR_BETWEEN_LEVELS = re.compile(r"^\.?[\s,;]*(?:(?:и|или|в)\s+)?[\s,;]*$", re.IGNORECASE)
 
 def _is_glue(fragment: str) -> bool:
     """True, если фрагмент между якорями — просто разделитель."""
@@ -191,7 +202,11 @@ def _group_anchors(anchors: list[_Anchor], text: str) -> list[list[_Anchor]]:
             if text[prev.start].lower() == "п" and text[cur.start].lower() == "ч":
                 prev.kind = "subpoint"
             elif text[prev.start].lower() == "ч" and text[cur.start].lower() == "п":
-                cur.kind = "subpoint"
+                nxt = anchors[i + 2] if i + 2 < len(anchors) else None
+                if nxt is not None and nxt.kind == "article" and _is_glue(text[cur.end:nxt.start]):
+                    prev.kind = "subpoint"     # часть 3 пункта 2 статьи 3: часть внутри пункта
+                else:
+                    cur.kind = "subpoint"      # ст. 105 ч. 2 п. а: пункт внутри части
 
     groups: list[list[_Anchor]] = [[anchors[0]]]
     direction: list[Optional[str]] = [None]   # "up": подпункт -> статья, "down": статья -> подпункт
@@ -207,7 +222,7 @@ def _group_anchors(anchors: list[_Anchor], text: str) -> list[list[_Anchor]]:
         # "подпунктом г пункта 6 части 1": лишний уровень "часть" входит в ту же ссылку
         extra_part = (glue and prev.kind == cur.kind == "point" and direction[-1] == "up"
                       and any(a.kind == "subpoint" for a in groups[-1])
-                      and text[cur.start].lower() == "ч")
+                      and text[prev.start].lower() == "п" and text[cur.start].lower() == "ч")
         if extra_part:
             groups[-1].append(cur)
         elif glue and rank_up and direction[-1] in (None, "up") or hybrid:
@@ -275,6 +290,58 @@ def _build_rawlink(group: list[_Anchor], text: str) -> RawLink:
         law_text=law_text,
     )
 
+# Контекст: "настоящего Федерального закона", "названного Кодекса", "Согласно УК РФ … ст. 105"
+RE_ANAPHORA = re.compile(
+    r"^(?:настоящ|названн|указанн|упомянут|вышеназванн|вышеуказанн|данн)\w*\s+(?P<kind>(?:[а-яё]+\s+)?(?:кодекс|закон|указ)\w*)",
+    re.IGNORECASE)
+RE_KNOWN_CODE_ABBR = re.compile(
+    r"(?<![А-Яа-яё])(?:УК|НК|ГК|ТК|СК|ЖК|ЗК|БК|АПК|ГПК|УПК|КАС|КоАП|ГрК|ВК|УИК)(?![А-Яа-яё])(?:\s+РФ)?")
+_LEFT_HEAD = r"(?i:(?:кодекс|закон|указ)(?:а|у|ом|е)?)(?![А-Яа-яёЁ])"
+RE_LEFT_LAW = re.compile(
+    rf"(?:{RE_KNOWN_CODE_ABBR.pattern}|(?:{LAW_ADJ}\s+){{0,4}}{_LEFT_HEAD}{LAW_POST}{_LAW_TAIL}|ФЗ{_LAW_TAIL})")
+_ABBREVIATIONS = {"ст", "п", "пп", "ч", "г", "т", "гг", "абз", "подп", "ст.ст", "п.п", "N", "№", "стр", "л.д", "ред"}
+RE_SENTENCE_BREAK = re.compile(r"([А-Яа-яёA-Za-z.№]*)[.!?]\s+(?=[А-ЯЁ«\"])")
+
+
+def _law_kind(law_text: str) -> str:
+    low = law_text.lower()
+    return "code" if "кодекс" in low or RE_KNOWN_CODE_ABBR.search(law_text) else "act"
+
+
+def _has_sentence_break(fragment: str) -> bool:
+    for m in RE_SENTENCE_BREAK.finditer(fragment):
+        if m.group(1).lower().rstrip(".") not in _ABBREVIATIONS and not m.group(1).isdigit():
+            return True
+    return "\n\n" in fragment
+
+
+def _resolve_law_context(rawlinks: list[RawLink], text: str) -> None:
+    """Дописывает law_text там, где закон назван не справа от ссылки."""
+    for i, r in enumerate(rawlinks):
+        if r.law_text is None:
+            continue
+        m = RE_ANAPHORA.match(r.law_text)
+        if not m:
+            continue
+        kind = "code" if "кодекс" in m.group("kind").lower() else "act"
+        r.law_text = None
+        for prev in (rawlinks[j] for j in range(i - 1, -1, -1)):
+            if prev.law_text and not RE_ANAPHORA.match(prev.law_text) and _law_kind(prev.law_text) == kind:
+                r.law_text = prev.law_text
+                break
+    for i, r in enumerate(rawlinks):
+        if r.law_text is not None:
+            continue
+        # закон, названный слева в том же предложении: "Согласно УК РФ … статьёй 105"
+        left_from = rawlinks[i - 1].end if i else 0
+        window = text[max(left_from, r.start - 300):r.start]
+        found = None
+        for m in RE_LEFT_LAW.finditer(window):
+            found = m
+        if found and not _has_sentence_break(window[found.end():]):
+            r.law_text = found.group(0).strip()
+
+
 def extract_links(text: str) -> list[RawLink]:
     """
     Находит в тексте ссылки на нормативные акты и раскладывает их на уровни.
@@ -291,7 +358,7 @@ def extract_links(text: str) -> list[RawLink]:
     # номера внутри названия закона («…части четвертой Гражданского кодекса…») — не ссылки
     kept: list[RawLink] = []
     for r in rawlinks:
-        if any(p.law_text and p.end - len(p.law_text) <= r.start < p.end for p in kept):
+        if any(p.law_text and p.end - len(p.law_text) <= r.start < p.end for p in kept[-5:]):
             continue
         kept.append(r)
     rawlinks = kept
@@ -306,4 +373,6 @@ def extract_links(text: str) -> list[RawLink]:
     for cur, nxt in zip(reversed(rawlinks[:-1]), reversed(rawlinks[1:])):
         if cur.law_text is None and nxt.law_text and _is_glue(text[cur.end:nxt.start]):
             cur.law_text = nxt.law_text
+
+    _resolve_law_context(rawlinks, text)
     return rawlinks
