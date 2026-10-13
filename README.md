@@ -17,7 +17,7 @@ docker run -d -p 8978:8978 --name law-links-container law-links-service
 ```
 
 При старте сервис строит индекс названий законов из `law_aliases.json`,
-это занимает около 30 секунд. Готовность можно проверить так:
+это занимает пару секунд. Готовность можно проверить так:
 
 ```bash
 curl http://localhost:8978/health
