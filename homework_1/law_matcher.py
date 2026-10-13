@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 from typing import Optional
@@ -52,13 +53,19 @@ def _tokens(text: str) -> tuple[str, ...]:
     return tuple(_WORDS.findall(_normal(text)))
 
 
+@lru_cache(maxsize=None)
+def _lemma(token: str) -> str:
+    """Cached: the same words repeat across thousands of aliases."""
+    return _MORPH.parse(token)[0].normal_form
+
+
 def _canonical(text: str) -> str:
     tokens = _tokens(text)
     if not tokens:
         return ""
     if _MORPH is not None:
         # Preserve numeric act identifiers (e.g. 152-ФЗ) and abbreviations.
-        return " ".join(_MORPH.parse(t)[0].normal_form if t.isalpha() and len(t) > 3 else t for t in tokens)
+        return " ".join(_lemma(t) if t.isalpha() and len(t) > 3 else t for t in tokens)
     if _STEMMER is not None:
         return " ".join(_STEMMER.stem(t) if t.isalpha() and len(t) > 3 else t for t in tokens)
     # Minimal, dependency-free support for frequent legal forms.
