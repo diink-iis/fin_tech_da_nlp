@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
@@ -12,6 +13,11 @@ from link_extractor import extract_links
 from number_parser import expand
 
 ALIASES_PATH = Path(__file__).resolve().with_name("law_aliases.json")
+
+# Ссылки, закон которых не определён (нет в базе, назван нестандартно), по умолчанию
+# не возвращаются: «лучше пропустить, чем ошибиться». RETURN_UNRESOLVED_LAWS=1 возвращает
+# их с law_id=null.
+RETURN_UNRESOLVED_LAWS = os.getenv("RETURN_UNRESOLVED_LAWS", "0") == "1"
 
 
 class LawLink(BaseModel):
@@ -32,6 +38,7 @@ class TextRequest(BaseModel):
 def detect_links(text: str) -> List[LawLink]:
     """
     Конвейер: extract_links -> find_law -> expand.
+    Без закона ссылка возвращается только при RETURN_UNRESOLVED_LAWS.
     Ошибка на одной ссылке не роняет весь запрос: такая ссылка пропускается.
     """
     links: List[LawLink] = []
@@ -44,6 +51,8 @@ def detect_links(text: str) -> List[LawLink]:
     for raw in raw_links:
         try:
             law_id = find_law(raw.law_text)
+            if law_id is None and not RETURN_UNRESOLVED_LAWS:
+                continue
             links.extend(expand(raw, law_id))
         except Exception as exc:
             print(f"Ссылка {raw!r} пропущена: {exc!r}")

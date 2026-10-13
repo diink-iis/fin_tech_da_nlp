@@ -177,7 +177,12 @@ class TestDetectLinks:
         got = {as_tuple(x) for x in self.detect_links("пп. 1, 2, 3 п. 2 ст. 3 НК РФ")}
         assert got == {(15, "3", "2", s) for s in "123"}
 
-    def test_unknown_law_gives_none_law_id(self):
+    def test_unknown_law_is_skipped_by_default(self):
+        assert list(self.detect_links("ст. 37 ФЗ №20-456")) == []
+
+    def test_unknown_law_gives_none_law_id_when_enabled(self, monkeypatch):
+        import main
+        monkeypatch.setattr(main, "RETURN_UNRESOLVED_LAWS", True)
         got = {as_tuple(x) for x in self.detect_links("ст. 37 ФЗ №20-456")}
         assert got == {(None, "37", None, None)}
 

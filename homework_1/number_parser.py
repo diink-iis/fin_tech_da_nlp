@@ -13,7 +13,9 @@ if TYPE_CHECKING:
     from main import LawLink
 
 # Чем могут разделяться номера в перечислении.
-_SEPARATOR = re.compile(r"\s*(?:[,;]|\b(?:и|или|либо)\b)\s*", re.IGNORECASE)
+_MARK = "\x00"
+_QUOTED_LETTER = re.compile("[\"«“„]([A-Za-zА-Яа-яЁё])[\"»”]")
+_SEPARATOR = re.compile(r"\s*(?:[,;]|(?<!\x00)\b(?:и|или|либо)\b)\s*", re.IGNORECASE)
 _NUMBER = re.compile(r"\d+(?:\.\d+)*(?:-\d+(?:\.\d+)*)?\Z")
 _LETTER = re.compile(r"[A-Za-zА-Яа-яЁё](?:-[A-Za-zА-Яа-яЁё])?\Z")
 _ROMAN = re.compile(r"[IVXLCDMivxlcdm]+\Z")
@@ -32,6 +34,12 @@ def _clean_item(item: str) -> str:
     return item
 
 
+_ORDINALS = {"перв": "1", "втор": "2", "трет": "3", "четвёрт": "4", "четверт": "4", "пят": "5",
+             "шест": "6", "седьм": "7", "восьм": "8", "девят": "9", "десят": "10"}
+_ORDINAL = re.compile(r"(перв|втор|трет|четвёрт|четверт|пят|шест|седьм|восьм|девят|десят)"
+                      r"(?:ая|ой|ую|ые|ых|ого|ое|ому)\Z", re.IGNORECASE)
+
+
 def _parse_numbers(value: str | None) -> list[str | None]:
     """Разбирает номера, убирает повторы и сохраняет порядок."""
     if value is None:
@@ -40,8 +48,13 @@ def _parse_numbers(value: str | None) -> list[str | None]:
         return []
     result: list[str] = []
     seen: set[str] = set()
+    # буква в кавычках («и», "к") — это значение, а не союз
+    value = _QUOTED_LETTER.sub(lambda m: _MARK + m.group(1), value)
     for part in _SEPARATOR.split(value):
-        number = _clean_item(part)
+        number = _clean_item(part.replace(_MARK, ""))
+        word = _ORDINAL.match(number)
+        if word:  # "части первой" -> "1"
+            number = _ORDINALS[word.group(1).lower()]
         if not number:
             continue
         if not (_NUMBER.fullmatch(number) or _LETTER.fullmatch(number)

@@ -4,6 +4,9 @@
     python -m eval.run --url http://host:8978/detect
     python -m eval.run --local main:detect_links   # вызвать функцию напрямую
     python -m eval.run --tag перечисление --min-f1 0.9
+    python -m eval.run --only-external                 # внешние эталоны
+    python -m eval.run --synthetic 500                 # плюс синтетика из базы законов
+    python -m eval.run --no-drop-unknown               # учитывать ссылки с law_id=None
 
 Запускать из корня homework_1. Код возврата 1, если F1 по полному кортежу ниже --min-f1.
 """
@@ -16,7 +19,9 @@ from importlib import import_module
 from typing import Callable, Dict, List
 
 from eval.errors import collect_errors, format_errors
+from eval.external import load_external
 from eval.gold import CASES, Case, Link
+from eval.synthetic import make_cases
 from eval.metrics import LEVELS, score_all
 
 DEFAULT_URL = "http://localhost:8978/detect"
@@ -71,13 +76,30 @@ def main(argv=None) -> int:
     ap.add_argument("--url", default=DEFAULT_URL)
     ap.add_argument("--local", metavar="module:function", help="вызвать функцию напрямую, без HTTP")
     ap.add_argument("--tag", action="append", help="только кейсы с этим тегом (можно несколько)")
+    ap.add_argument("--external", action="store_true",
+                    help="добавить эталоны fpakhurov/law-links (теги ext_gold, ext_real, ext_test)")
+    ap.add_argument("--only-external", action="store_true", help="только внешние эталоны")
+    ap.add_argument("--synthetic", type=int, metavar="N", default=0,
+                    help="добавить N синтетических кейсов из law_aliases.json (тег synthetic)")
+    ap.add_argument("--drop-unknown", action=argparse.BooleanOptionalAction, default=True,
+                    help="не учитывать ссылки с law_id=None, и в эталоне, и в ответе (по умолчанию да; "
+                         "соответствует сервису, который такие ссылки не возвращает)")
     ap.add_argument("--min-f1", type=float, default=0.0, help="порог F1 для кода возврата")
     ap.add_argument("--no-errors", action="store_true", help="не печатать список ошибок")
     args = ap.parse_args(argv)
 
-    cases = [c for c in CASES if not args.tag or set(args.tag) & set(c.tags)]
+    cases = ([] if args.only_external else list(CASES)) + (
+        load_external() if args.external or args.only_external else [])
+    if args.synthetic:
+        cases += make_cases(args.synthetic)
+    cases = [c for c in cases if not args.tag or set(args.tag) & set(c.tags)]
+    if args.drop_unknown:
+        cases = [Case(c.id, c.text, [l for l in c.expected if l[0] is not None], c.tags)
+                 for c in cases]
     detect = local_detector(args.local) if args.local else http_detector(args.url)
     predicted = predict(cases, detect)
+    if args.drop_unknown:
+        predicted = {k: [l for l in v if l[0] is not None] for k, v in predicted.items()}
 
     print(metrics_table(f"=== ИТОГО ({len(cases)} кейсов) ===", cases, predicted))
 
