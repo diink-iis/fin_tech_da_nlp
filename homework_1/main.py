@@ -1,10 +1,17 @@
-import json
-from typing import List, Optional, Dict
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import List, Optional
 
 import uvicorn
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI
 from pydantic import BaseModel
-from contextlib import asynccontextmanager
+
+import law_matcher
+from law_matcher import find_law
+from link_extractor import extract_links
+from number_parser import expand
+
+ALIASES_PATH = Path(__file__).resolve().with_name("law_aliases.json")
 
 
 class LawLink(BaseModel):
@@ -22,22 +29,35 @@ class TextRequest(BaseModel):
     text: str
 
 
+def detect_links(text: str) -> List[LawLink]:
+    """
+    Конвейер: extract_links -> find_law -> expand.
+    Ошибка на одной ссылке не роняет весь запрос: такая ссылка пропускается.
+    """
+    links: List[LawLink] = []
+    try:
+        raw_links = extract_links(text)
+    except Exception as exc:
+        print(f"extract_links: {exc!r}")
+        return links
+
+    for raw in raw_links:
+        try:
+            law_id = find_law(raw.law_text)
+            links.extend(expand(raw, law_id))
+        except Exception as exc:
+            print(f"Ссылка {raw!r} пропущена: {exc!r}")
+    return links
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    with open("law_aliases.json", "r") as file:
-        codex_aliases = json.load(file)
-    
-    app.state.codex_aliases = codex_aliases
+    # Startup: индекс алиасов строится один раз, а не на каждый запрос
+    law_matcher.initialize(ALIASES_PATH)
     print("🚀 Сервис запускается...")
     yield
     # Shutdown
-    del codex_aliases
     print("🛑 Сервис завершается...")
-
-
-def get_codex_aliases(request: Request) -> Dict:
-    return request.app.state.codex_aliases
 
 
 app = FastAPI(
@@ -49,32 +69,11 @@ app = FastAPI(
 
 
 @app.post("/detect")
-async def get_law_links(
-    data: TextRequest,
-    request: Request,
-    codex_aliases: Dict = Depends(get_codex_aliases),
-    ) -> LinksResponse:
+def get_law_links(data: TextRequest) -> LinksResponse:
     """
     Принимает текст и возвращает список юридических ссылок
     """
-    # Место для алгоритма распознавания ссылок
-    text_length = len(data.text)
-    print(codex_aliases["1"])
-
-    sample_links = [
-        LawLink(
-            law_id=1,
-            article="12",
-            point_article="б",
-        ),
-        LawLink(
-            law_id=2,
-            article="45",
-            point_article="3",
-            subpoint_article="б",
-        )
-    ]
-    return LinksResponse(links=sample_links)
+    return LinksResponse(links=detect_links(data.text))
 
 
 @app.get("/health")
@@ -83,7 +82,6 @@ async def health_check():
     Проверка состояния сервиса
     """
     return {"status": "healthy"}
-
 
 
 if __name__ == "__main__":

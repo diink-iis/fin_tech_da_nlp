@@ -6,7 +6,7 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+COPY contracts.py law_matcher.py link_extractor.py number_parser.py main.py ./
 COPY law_aliases.json .
 
 EXPOSE 8978
