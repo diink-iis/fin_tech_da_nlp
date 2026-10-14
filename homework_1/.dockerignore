@@ -1,0 +1,13 @@
+.git
+.github
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+tests
+eval
+scripts
+Makefile
+*.md
+*.pdf
+requirements-dev.txt

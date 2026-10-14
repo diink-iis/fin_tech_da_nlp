@@ -1,0 +1,24 @@
+# Оценка качества (участник 5)
+
+Запускать из корня `homework_1`.
+
+```bash
+python -m eval.run                       # по HTTP: http://localhost:8978/detect
+python -m eval.run --local main:detect_links   # вызвать функцию напрямую
+python -m eval.run --tag перечисление    # только кейсы с тегом
+python -m eval.run --min-f1 0.9          # код возврата 1, если F1 ниже порога
+python -m eval.run --only-external        # внешние эталоны (fpakhurov/law-links, MIT)
+python -m eval.run --synthetic 500        # плюс синтетика из law_aliases.json (eval/synthetic.py)
+pytest                                   # юнит-тесты (тесты модулей пропускаются, пока модуля нет)
+```
+
+- `gold.py` — эталон: текст → ожидаемые `(law_id, article, point, subpoint)`. Закон не из базы = `law_id None`.
+- `metrics.py` — P/R/F1 по уровням; уровни кумулятивные (`point` верен, если верны law_id, article и point).
+- `errors.py` — показ ошибок: ожидали / получили / в каком модуле искать причину (эвристика).
+- Новый кейс добавляется в `CASES` в `gold.py`; `tests/test_gold.py` проверит, что law_id существуют в базе.
+- `external.py` + `data/law-links/` — эталоны чужого репозитория [fpakhurov/law-links](https://github.com/fpakhurov/law-links) (MIT, лицензия рядом). Их разметка не содержит ссылок на законы вне `law_aliases.json`; сервис такие ссылки тоже не возвращает, поэтому `--drop-unknown` включён по умолчанию (отключается `--no-drop-unknown`).
+- `gold_test` у них отложенный набор; мы смотрели на его ошибки при доработке, так что для честной оценки нужны новые тексты.
+- `synthetic.py` — бенч из `law_aliases.json`: случайный закон и уровни, половина названий в родительном падеже. Проверяет, что любой тип акта (указ, распоряжение, закон, стандарт) вырезается и находится в базе.
+- `../scripts/speed.py` — замер скорости против лимита проверки (`make speed`).
+- `holdout.py` — отложенный набор (45 кейсов), написан после фиксации правил: `python -m eval.run --local main:detect_links --holdout --tag holdout`. После правок по его ошибкам набор перестаёт быть независимым.
+- `survey.py` — сверка с ответами модели авторов `law-links` на фрагментах открытого опроса (нужен интернет, ~2 МБ). Это не разметка людей.
