@@ -21,9 +21,12 @@ Docker:
 ```bash
 docker build -t law-links-service .
 docker run -d -p 8978:8978 --name law-links-container law-links-service
+until curl -sf http://localhost:8978/health >/dev/null; do sleep 0.5; done   # дождаться запуска
 curl -X POST http://localhost:8978/detect -H "Content-Type: application/json" \
      -d '{"text": "Согласно статье 23 Налогового кодекса и ст. 145 Гражданского кодекса"}'
 ```
+
+Если выполнить `curl` в ту же секунду после `docker run`, контейнер может ответить `Connection reset by peer`: порт уже открыт, приложение ещё нет.
 
 Без Docker (Python 3.12):
 
@@ -40,8 +43,8 @@ make run          # то же, что uvicorn main:app --port 8978
 | `GET /health` | `{"status": "healthy"}` |
 | `GET /docs` | Swagger |
 
-Контейнер поднимается за 3–6 секунд (строится индекс названий законов), занимает около 90 МБ памяти,
-образ весит около 260 МБ, процесс работает не от root, в образе настроен `HEALTHCHECK`.
+Контейнер начинает отвечать примерно через секунду: индекс названий законов собирается один раз при сборке образа,
+а не при каждом запуске. Памяти он занимает около 90 МБ, образ весит около 270 МБ, процесс работает не от root, в образе настроен `HEALTHCHECK`.
 
 ## Устройство
 
@@ -137,6 +140,6 @@ homework_1/                  # эта папка
 ## Источники данных
 
 Реальные тексты и разметку для оценки мы взяли из открытого репозитория [fpakhurov/law-links](https://github.com/fpakhurov/law-links)
-(MIT): они лежат в `eval/data/law-links/` вместе с лицензией и используются только для проверки.
+(MIT): они лежат в `eval/data/law-links/` вместе с лицензией и используются для проверки.
 Для сверки используется их открытый датасет [law-links-votes](https://huggingface.co/datasets/fpakhurov/law-links-votes).
 Алгоритм распознавания написан нами.

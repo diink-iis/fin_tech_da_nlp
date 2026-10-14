@@ -12,6 +12,7 @@
 cd homework_1
 docker build -t law-links-service .
 docker run -d -p 8978:8978 --name law-links-container law-links-service
+sleep 2   # подождать запуск сервиса
 curl -X POST http://localhost:8978/detect -H "Content-Type: application/json" \
      -d '{"text": "Согласно статье 23 Налогового кодекса и ст. 145 Гражданского кодекса"}'
 ```

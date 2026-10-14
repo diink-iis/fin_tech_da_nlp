@@ -166,3 +166,28 @@ def test_adversarial_inputs_are_fast():
     for t in texts:
         main.detect_links(t)
     assert time.time() - start < 20
+
+
+# ---------------------------------------------------------------- кэш индекса
+def test_index_cache_roundtrip(tmp_path, monkeypatch):
+    import law_matcher as lm
+    monkeypatch.setattr(lm, "_CACHE_FILE", tmp_path / "law_index.cache")
+    names = ["НК РФ", "Закона № 580-ФЗ", "Уголовно-исполнительного кодекса Российской Федерации", "Конституции"]
+    lm.initialize()
+    before = [lm.find_law(n) for n in names]
+    lm.build_cache()
+    lm._INDEX = None
+    lm.initialize()
+    assert [lm.find_law(n) for n in names] == before
+
+
+def test_stale_cache_is_ignored(tmp_path, monkeypatch):
+    import law_matcher as lm
+    cache = tmp_path / "law_index.cache"
+    monkeypatch.setattr(lm, "_CACHE_FILE", cache)
+    with cache.open("wb") as f:
+        import pickle
+        pickle.dump(("устаревший-ключ", ({}, {}, {}, {})), f)
+    assert lm._load_cache(lm._DATA_FILE) is None
+    cache.write_bytes(b"not a pickle")
+    assert lm._load_cache(lm._DATA_FILE) is None
