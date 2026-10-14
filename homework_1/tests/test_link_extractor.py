@@ -1,5 +1,3 @@
-import pytest
-from contracts import RawLink
 from link_extractor import extract_links
 
 def _one(text, **expected):

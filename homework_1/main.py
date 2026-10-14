@@ -42,7 +42,7 @@ def detect_links(text: str) -> List[LawLink]:
     links: List[LawLink] = []
     try:
         raw_links = extract_links(text)
-    except Exception as exc:
+    except Exception:
         logger.exception("extract_links failed")
         return links
 

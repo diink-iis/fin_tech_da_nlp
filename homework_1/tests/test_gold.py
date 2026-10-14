@@ -30,8 +30,8 @@ def test_readme_has_about_thirty_links():
 
 
 def test_readme_text_matches_task():
-    """Текст эталона должен совпадать с test_text из README задания."""
-    readme_md = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    """Текст эталона должен совпадать с test_text из TASK.md."""
+    readme_md = (Path(__file__).resolve().parents[1] / "TASK.md").read_text()
     start = readme_md.index('test_text = """') + len('test_text = """')
     task_text = readme_md[start:readme_md.index('"""', start)]
     gold_text = next(c for c in CASES if c.id == "readme_full").text

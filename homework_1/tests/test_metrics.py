@@ -1,5 +1,3 @@
-import pytest
-
 from eval.errors import EXTRACTOR, EXTRACTOR_OR_PARSER, LAW_MATCHER, diff_case
 from eval.metrics import score_all, score_level
 

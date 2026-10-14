@@ -6,7 +6,7 @@
 """
 from typing import List
 
-from eval.gold import (APK, GK, GPK, KOAP, NK, POLICE, TK, UK, CONSUMER, PERSDATA, Case, L)
+from eval.gold import (APK, GK, KOAP, NK, POLICE, TK, UK, CONSUMER, PERSDATA, Case, L)
 
 ZK, UPK, JK, BK = 16, 12, 7, 1
 EXEC_PROC, ADS, LLC, BANKRUPT, CONTRACT_SYS, EDUCATION, MILITARY = 308, 337, 470, 386, 210, 216, 465
