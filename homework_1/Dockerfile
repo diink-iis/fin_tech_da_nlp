@@ -12,6 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY contracts.py law_matcher.py link_extractor.py number_parser.py main.py ./
 COPY law_aliases.json .
 
+# индекс законов собирается один раз при сборке образа, контейнер стартует за доли секунды
+RUN python -c "import law_matcher; law_matcher.build_cache()"
+
 USER app
 EXPOSE 8978
 

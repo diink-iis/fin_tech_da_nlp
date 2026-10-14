@@ -10,7 +10,9 @@ on link_extractor, number_parser or main.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import pickle
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -28,6 +30,8 @@ except ImportError:
     RussianStemmer = None
 
 _DATA_FILE = Path(__file__).resolve().with_name("law_aliases.json")
+_CACHE_FILE = Path(__file__).resolve().with_name("law_index.cache")
+_CACHE_VERSION = 1  # увеличить при изменении нормализации или структуры индексов
 _LOCK = Lock()
 _MAX_LAW_TEXT = 1500  # самое длинное название в базе около 400 символов; длиннее — мусор
 _INDEX: dict[str, set[int]] | None = None
@@ -197,6 +201,33 @@ def _find_by_number(law_text: str) -> Optional[int]:
     return None
 
 
+def _cache_key(source: Path) -> str:
+    """Ключ кэша: содержимое базы, версия кода индекса и версия pymorphy3."""
+    digest = hashlib.sha1(source.read_bytes()).hexdigest()
+    version = getattr(pymorphy3, "__version__", "none") if pymorphy3 is not None else "none"
+    return f"{_CACHE_VERSION}:{version}:{digest}"
+
+
+def _load_cache(source: Path):
+    """Индексы из кэша, собранного при сборке образа; None, если кэша нет или он устарел."""
+    try:
+        with _CACHE_FILE.open("rb") as f:
+            key, payload = pickle.load(f)
+        return payload if key == _cache_key(source) else None
+    except (OSError, pickle.UnpicklingError, EOFError, ValueError, AttributeError, TypeError):
+        return None
+
+
+def build_cache(path: str | Path | None = None) -> Path:
+    """Собрать индексы и сохранить рядом с модулем (вызывается при сборке Docker-образа)."""
+    source = Path(path) if path is not None else _DATA_FILE
+    initialize(source)
+    with _CACHE_FILE.open("wb") as f:
+        pickle.dump((_cache_key(source), (_INDEX, _EXACT_INDEX, _NUM_INDEX, _NUM_TITLES)), f,
+                    protocol=pickle.HIGHEST_PROTOCOL)
+    return _CACHE_FILE
+
+
 def initialize(path: str | Path | None = None) -> None:
     """Prepare index once at FastAPI lifespan startup. Optional custom JSON path."""
     global _INDEX, _EXACT_INDEX, _MORPH, _STEMMER, _NUM_INDEX, _NUM_TITLES
@@ -208,6 +239,10 @@ def initialize(path: str | Path | None = None) -> None:
         elif pymorphy3 is None and RussianStemmer is not None and _STEMMER is None:
             _STEMMER = RussianStemmer()
         source = Path(path) if path is not None else _DATA_FILE
+        cached = _load_cache(source)  # ключ кэша содержит хеш базы, чужой файл кэш не подхватит
+        if cached is not None:
+            _INDEX, _EXACT_INDEX, _NUM_INDEX, _NUM_TITLES = cached
+            return
         index, exact = _make_indexes(source)
         _INDEX, _EXACT_INDEX = index, exact
         _NUM_INDEX, _NUM_TITLES = _make_number_index(source)
@@ -280,4 +315,4 @@ def _find_by_name(law_text: Optional[str]) -> Optional[int]:
         return None
 
 
-__all__ = ["find_law", "initialize"]
+__all__ = ["build_cache", "find_law", "initialize"]
