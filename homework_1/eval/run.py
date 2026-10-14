@@ -21,6 +21,7 @@ from typing import Callable, Dict, List
 from eval.errors import collect_errors, format_errors
 from eval.external import load_external
 from eval.gold import CASES, Case, Link
+from eval.holdout import HOLDOUT
 from eval.synthetic import make_cases
 from eval.metrics import LEVELS, score_all
 
@@ -79,6 +80,7 @@ def main(argv=None) -> int:
     ap.add_argument("--external", action="store_true",
                     help="добавить эталоны fpakhurov/law-links (теги ext_gold, ext_real, ext_test)")
     ap.add_argument("--only-external", action="store_true", help="только внешние эталоны")
+    ap.add_argument("--holdout", action="store_true", help="добавить отложенный набор (тег holdout)")
     ap.add_argument("--synthetic", type=int, metavar="N", default=0,
                     help="добавить N синтетических кейсов из law_aliases.json (тег synthetic)")
     ap.add_argument("--drop-unknown", action=argparse.BooleanOptionalAction, default=True,
@@ -90,6 +92,8 @@ def main(argv=None) -> int:
 
     cases = ([] if args.only_external else list(CASES)) + (
         load_external() if args.external or args.only_external else [])
+    if args.holdout:
+        cases += HOLDOUT
     if args.synthetic:
         cases += make_cases(args.synthetic)
     cases = [c for c in cases if not args.tag or set(args.tag) & set(c.tags)]

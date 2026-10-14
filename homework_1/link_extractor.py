@@ -237,7 +237,7 @@ def _group_anchors(anchors: list[_Anchor], text: str) -> list[list[_Anchor]]:
     return groups
 
 # Вырезание
-RE_SPACES = re.compile(r"[ \t\u00a0]*")
+RE_SPACES = re.compile(r"[ \t\u00a0]*(?:\n[ \t\u00a0]*)?")   # допускаем один перенос строки
 
 def _extract_law_text(text: str, search_from: int) -> tuple[Optional[str], int]:
     """

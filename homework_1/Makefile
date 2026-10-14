@@ -2,7 +2,7 @@ PYTHON ?= python
 IMAGE ?= law-links-service
 CONTAINER ?= law-links-container
 
-.PHONY: install test eval speed run docker-build docker-run docker-stop smoke
+.PHONY: install test eval survey speed run docker-build docker-run docker-stop smoke
 
 install:
 	$(PYTHON) -m pip install -r requirements-dev.txt
@@ -12,7 +12,10 @@ test:
 
 # метрики по нашему, внешнему и синтетическому эталонам без запуска сервиса
 eval:
-	$(PYTHON) -m eval.run --local main:detect_links --external --synthetic 500
+	$(PYTHON) -m eval.run --local main:detect_links --external --synthetic 500 --holdout
+
+survey:
+	$(PYTHON) -m eval.survey
 
 # 2000 текстов против лимита проверки (5 минут), сервис должен быть запущен
 speed:
