@@ -18,3 +18,7 @@ curl -X POST http://localhost:8978/detect -H "Content-Type: application/json" \
 ```
 
 CI (`.github/workflows/ci.yml`) для `homework_1` прогоняет тесты, оценку и замер скорости, собирает образ и делает запрос к `/detect`.
+
+## Авторы
+
+Исаева Диана, Селюшкина Наталья, Кунашева Илана, Вишневская Мелания, Демина Ксения.
