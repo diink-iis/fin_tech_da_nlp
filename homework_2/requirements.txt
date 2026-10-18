@@ -1,0 +1,5 @@
+# Python 3.12; роль 2 (семантика). Остальные роли добавляют свои зависимости.
+numpy>=1.26
+sentence-transformers>=3.0
+# torch ставится вместе с sentence-transformers; для CPU-образа можно взять лёгкую сборку:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
