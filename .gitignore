@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# macOS
+.DS_Store
+
+# Проект №2: локальная база и скачанные модели
+*.db
+*.sqlite
+*.sqlite3
+homework_2/models/
+homework_2/*.cache
