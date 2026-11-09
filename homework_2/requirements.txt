@@ -3,3 +3,4 @@ numpy>=1.26
 sentence-transformers>=3.0
 # torch ставится вместе с sentence-transformers; для CPU-образа можно взять лёгкую сборку:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
+pymorphy3>=2.0,<3.0
