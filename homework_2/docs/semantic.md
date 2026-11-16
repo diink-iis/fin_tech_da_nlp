@@ -1,13 +1,14 @@
 # Семантический фильтр (роль 2)
 
 Модуль `app/engines/semantic.py`: решает, подходит ли новость к теме по смыслу, даже без общих слов.
-Не знает о БД и сети: на входе `Article` и `Filter`, на выходе `MatchReason` или `None`.
+Не управляет БД и RSS: на входе `Article` и `Filter`, на выходе `MatchReason` или `None`.
+При первой загрузке модели библиотека может обращаться в сеть; для автономной работы модель готовят заранее.
 
 ## Интерфейс
 
 ```python
 engine = SemanticEngine()                       # модель по умолчанию cointegrated/rubert-tiny2, CPU
-engine.index(articles)                          # векторы пакетом, повторно не считает
+engine.index(articles)                          # векторы пакетом; возвращает число новых уникальных векторов
 reason = engine.match(article, flt)             # MatchReason(details={"score","threshold","best_phrase"}) | None
 engine.rank(articles, flt)                      # [(article, score)] по убыванию, без порога: предпросмотр темы
 engine.article_vector(article)                  # вектор для БД; to_bytes / from_bytes, preload() кладёт его обратно в кэш
@@ -15,8 +16,18 @@ engine.article_vector(article)                  # вектор для БД; to_b
 
 Тема (`Filter(kind="topic")`): `params = {"description": "...", "examples": ["..."], "threshold": 0.45, "aggregate": "mean"|"max"}`.
 Фразы темы (описание и примеры) по умолчанию усредняются в один вектор, `max` берёт лучшую фразу (тема как «или»).
-Ошибки конфигурации (порог не число или вне [-1, 1], неверный `aggregate`, модель не загрузилась) — `SemanticError` с понятным текстом:
+Ошибки конфигурации (порог не число или вне [-1, 1], неверный `aggregate`), загрузки и выполнения модели,
+а также некорректные векторы — `SemanticError` с понятным текстом:
 вызывающий код (роль 4) показывает его в интерфейсе, а не роняет сервис.
+
+Кэш ограничен по размеру и использует LRU: чтение продлевает срок хранения вектора.
+Повторно используются только оставшиеся в кэше векторы; после вытеснения текст может кодироваться заново.
+`index()` считает новые векторы независимо от вытеснений, а не прирост размера кэша.
+HTML очищается вместе с содержимым `script/style`; пустые после очистки фразы темы отбрасываются.
+
+`score` — косинусное сходство, не вероятность и не процент уверенности. В режиме `mean`
+оно относится к усреднённой теме, а `best_phrase` показывает ближайшую отдельную фразу.
+`rank()` — Python-метод; в текущем бэкенде HTTP-маршрута предпросмотра ещё нет.
 
 ## Что нужно от других ролей
 
@@ -24,7 +35,7 @@ engine.article_vector(article)                  # вектор для БД; to_b
 |------|-----|
 | 3 (агрегатор) | `Article` с заголовком и анонсом; HTML можно оставить, модуль его чистит |
 | 4 (бэкенд) | при сохранении статьи вызвать `engine.index([...])` (или `article_vector` + `to_bytes` в БД, при чтении `preload`); `SemanticError` превращать в понятный ответ API; загружать модель один раз при старте |
-| 5 (интерфейс) | поле темы (описание, при желании примеры), ползунок порога в диапазоне 0.30–0.60, оценка сходства в карточке новости, предпросмотр через `rank` |
+| 5 (интерфейс) | поле темы (описание, при желании примеры), ползунок порога в диапазоне 0.30–0.60, оценка сходства в карточке новости; для предпросмотра через `rank` роль 4 должна добавить HTTP-маршрут |
 
 ## Выбор модели
 
@@ -65,10 +76,33 @@ engine.article_vector(article)                  # вектор для БД; to_b
 
 ## Запуск
 
+Из корня репозитория, в окружении Python 3.12:
+
 ```bash
-pip install -r requirements.txt pytest
-python -m pytest -q                            # быстрые тесты без модели (32)
-RUN_MODEL_TESTS=1 python -m pytest -q          # плюс проверки на реальной модели (первый запуск скачивает ~110 МБ)
-python -m scripts.bench_semantic               # качество и скорость на размеченном наборе
+cd homework_2
+python -m pip install -r requirements.txt pytest
+python -m pytest -q tests/test_semantic.py tests/test_semantic_regressions.py tests/test_prepare_semantic.py
+python -m scripts.prepare_semantic            # первая загрузка модели требует сети, затем выполняется пробное кодирование
+python -m scripts.prepare_semantic --offline  # проверка того же кэша без сети
+HF_HUB_OFFLINE=1 RUN_MODEL_TESTS=1 python -m pytest -q tests/test_semantic.py tests/test_semantic_regressions.py
+HF_HUB_OFFLINE=1 python -m scripts.bench_semantic
 python -m scripts.bench_semantic --models cointegrated/rubert-tiny2 intfloat/multilingual-e5-small
 ```
+
+`prepare_semantic` возвращает код 0 при успехе и 1 с понятным сообщением при `SemanticError`.
+Импорт скрипта модель не загружает. Для другой модели или уже скачанного локального каталога:
+
+```bash
+python -m scripts.prepare_semantic --model /absolute/path/to/rubert-tiny2 --offline
+```
+
+Приложение должно использовать ту же модель: например, `SemanticEngine(model_name="/absolute/path/to/rubert-tiny2")`.
+Локальный путь сам по себе не меняет модель по умолчанию в бэкенде.
+
+Кэш Hugging Face должен сохраняться между подготовкой и демонстрацией. Можно выбрать постоянный
+каталог, например `export HF_HOME="$PWD/models/hf-cache"`, **до запуска** подготовки,
+тестов и сервера. Если модель уже есть в стандартном кэше, менять `HF_HOME` не обязательно.
+Запускайте проверку `--offline` в том же окружении, с тем же пользователем и `HF_HOME`, что и приложение.
+В Docker кэш хоста автоматически не доступен: его надо смонтировать в контейнер с соответствующим
+`HF_HOME` или заранее загрузить модель внутри образа/постоянного volume. Подготовка модели
+не исправляет отсутствующие зависимости бэкенда или конфигурацию Docker других ролей.

@@ -15,10 +15,10 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import re
 import threading
 from collections import OrderedDict
+from html.parser import HTMLParser
 from typing import Callable, Iterable, Optional, Sequence
 
 import numpy as np
@@ -32,19 +32,54 @@ DEFAULT_THRESHOLD = 0.45
 
 Encoder = Callable[[Sequence[str]], np.ndarray]
 
-_TAGS = re.compile(r"<[^>]+>")
 _SPACES = re.compile(r"\s+")
+_BLOCK_TAGS = frozenset({
+    "address", "article", "blockquote", "br", "div", "h1", "h2", "h3", "h4", "h5", "h6",
+    "hr", "li", "ol", "p", "section", "table", "td", "th", "tr", "ul",
+})
 
 
 class SemanticError(RuntimeError):
-    """Модель не загрузилась или фильтр заполнен неверно; сервис не должен падать, а показать причину."""
+    """Ошибка модели, вектора или настроек; вызывающий код может показать понятную причину."""
+
+
+class _PlainText(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.hidden: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in {"script", "style"}:
+            self.hidden.append(tag)
+        elif tag in _BLOCK_TAGS and not self.hidden:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style"} and tag in self.hidden:
+            self.hidden.remove(tag)
+        elif tag in _BLOCK_TAGS and not self.hidden:
+            self.parts.append(" ")
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        if tag in _BLOCK_TAGS and not self.hidden:
+            self.parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if not self.hidden:
+            self.parts.append(data)
 
 
 def clean_text(text: Optional[str]) -> str:
     """HTML, сущности и лишние пробелы убираются; роль 3 тоже чистит, но на всякий случай."""
-    if not text:
+    if text is None:
         return ""
-    return _SPACES.sub(" ", html.unescape(_TAGS.sub(" ", text))).strip()
+    if not isinstance(text, str):
+        raise SemanticError("текст новости или темы должен быть строкой")
+    parser = _PlainText()
+    parser.feed(text)
+    parser.close()
+    return _SPACES.sub(" ", "".join(parser.parts)).strip()
 
 
 def article_text(article: Article, max_chars: int = 1000) -> str:
@@ -83,6 +118,10 @@ class SemanticEngine:
 
         query_prefix и passage_prefix нужны моделям семейства e5 ("query: ", "passage: ").
         """
+        for name, value, minimum in (("max_chars", max_chars, 1), ("batch_size", batch_size, 1),
+                                     ("cache_size", cache_size, 0)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise SemanticError(f"{name} должен быть целым числом не меньше {minimum}")
         self.model_name = model_name
         self.query_prefix = query_prefix
         self.passage_prefix = passage_prefix
@@ -90,7 +129,10 @@ class SemanticEngine:
         self.batch_size = batch_size
         self.device = device
         self._encoder = encoder
-        self._lock = threading.Lock()
+        # FastAPI can share the engine between worker threads. Keep cache lookup,
+        # missing-vector computation and eviction atomic, including nested _load().
+        self._lock = threading.RLock()
+        self._dimension: Optional[int] = None
         self._cache: "OrderedDict[str, np.ndarray]" = OrderedDict()
         self._cache_size = cache_size
 
@@ -112,39 +154,72 @@ class SemanticEngine:
         """Нормализованные векторы float32 формы (n, d); пустой вход даёт пустой массив."""
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
-        vectors = np.asarray(self._load()(list(texts)), dtype=np.float32)
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        return vectors / np.where(norms == 0, 1.0, norms)
+        with self._lock:
+            encoder = self._load()
+            try:
+                raw = encoder(list(texts))
+            except SemanticError:
+                raise
+            except Exception as exc:
+                raise SemanticError(f"не удалось вычислить эмбеддинги моделью {self.model_name}: {exc}") from exc
+            return self._normalize_vectors(raw, len(texts))
+
+    def _normalize_vectors(self, raw, rows: int) -> np.ndarray:
+        """Validate encoder/preloaded vectors before they can enter the cache. Caller holds _lock."""
+        try:
+            with np.errstate(over="ignore", invalid="ignore"):
+                vectors = np.asarray(raw, dtype=np.float32)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise SemanticError("эмбеддинги должны быть числовыми векторами float32") from exc
+        if vectors.ndim != 2 or vectors.shape[0] != rows or vectors.shape[1] == 0:
+            raise SemanticError(f"неверная форма эмбеддингов: ожидается ({rows}, d), d > 0; получено {vectors.shape}")
+        if not np.isfinite(vectors).all():
+            raise SemanticError("эмбеддинги содержат NaN или бесконечность")
+        dimension = vectors.shape[1]
+        if self._dimension is not None and dimension != self._dimension:
+            raise SemanticError(f"несовместимая размерность эмбеддингов: {dimension}, ожидается {self._dimension}")
+        # float64 norms avoid overflow for large but finite float32 inputs.
+        norms = np.linalg.norm(vectors.astype(np.float64), axis=1, keepdims=True)
+        normalized = (vectors / np.where(norms == 0, 1.0, norms)).astype(np.float32)
+        self._dimension = dimension
+        return normalized
 
     # ------------------------------------------------------------------- кэш
     def _remember(self, key: str, vector: np.ndarray) -> None:
-        self._cache[key] = vector
-        self._cache.move_to_end(key)
-        while len(self._cache) > self._cache_size:
-            self._cache.popitem(last=False)
+        with self._lock:
+            self._cache[key] = vector
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
 
     def _vectors(self, texts: Sequence[str], prefix: str) -> np.ndarray:
         """Векторы текстов; недостающие считаются одним пакетом, остальные берутся из кэша."""
+        return self._cached_vectors(texts, prefix)[0]
+
+    def _cached_vectors(self, texts: Sequence[str], prefix: str) -> tuple[np.ndarray, int]:
+        """Return vectors and the number computed, regardless of cache eviction."""
         if not texts:
-            return np.zeros((0, 0), dtype=np.float32)
-        keys = [_key(prefix + t) for t in texts]
-        found = {k: self._cache[k] for k in keys if k in self._cache}
-        unique: dict[str, str] = {}
-        for k, t in zip(keys, texts):
-            if k not in found:
-                unique.setdefault(k, prefix + t)
-        if unique:
-            for k, v in zip(unique, self.embed(list(unique.values()))):
-                found[k] = v
-                self._remember(k, v)   # кэш ограничен: результат берём из found, а не из кэша
-        return np.stack([found[k] for k in keys])
+            return np.zeros((0, 0), dtype=np.float32), 0
+        with self._lock:
+            keys = [_key(prefix + t) for t in texts]
+            found: dict[str, np.ndarray] = {}
+            unique: dict[str, str] = {}
+            for k, t in zip(keys, texts):
+                if k in self._cache:
+                    found[k] = self._cache[k]
+                    self._cache.move_to_end(k)
+                else:
+                    unique.setdefault(k, prefix + t)
+            if unique:
+                for k, v in zip(unique, self.embed(list(unique.values()))):
+                    found[k] = v
+                    self._remember(k, v)   # результат берём из found: кэш мог уже вытеснить вектор
+            return np.stack([found[k] for k in keys]), len(unique)
 
     def index(self, articles: Iterable[Article]) -> int:
-        """Посчитать и закэшировать векторы статей пакетами; возвращает число новых векторов."""
+        """Число вычисленных уникальных векторов, включая впоследствии вытесненные из LRU-кэша."""
         texts = [article_text(a, self.max_chars) for a in articles]
-        before = len(self._cache)
-        self._vectors([t for t in texts if t], self.passage_prefix)
-        return len(self._cache) - before
+        return self._cached_vectors([t for t in texts if t], self.passage_prefix)[1]
 
     def article_vector(self, article: Article) -> Optional[np.ndarray]:
         """Вектор статьи для хранения в БД (to_bytes/from_bytes); None, если текста нет."""
@@ -152,31 +227,62 @@ class SemanticEngine:
         return self._vectors([text], self.passage_prefix)[0] if text else None
 
     def preload(self, article: Article, vector: np.ndarray) -> None:
-        """Положить в кэш вектор, прочитанный из БД, чтобы не считать его заново."""
+        """Проверить, нормализовать и закэшировать вектор из БД, чтобы не считать его заново."""
         text = article_text(article, self.max_chars)
         if text:
-            self._remember(_key(self.passage_prefix + text), np.asarray(vector, dtype=np.float32))
+            with self._lock:
+                try:
+                    raw = np.asarray(vector, dtype=np.float32)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise SemanticError("сохранённый эмбеддинг должен быть числовым вектором") from exc
+                if raw.ndim != 1:
+                    raise SemanticError("сохранённый эмбеддинг должен быть одномерным вектором")
+                normalized = self._normalize_vectors(raw[np.newaxis, :], 1)[0]
+                self._remember(_key(self.passage_prefix + text), normalized)
 
     # ------------------------------------------------------------------ тема
     @staticmethod
+    def _params(flt: Filter) -> dict:
+        if flt.params is None:
+            return {}
+        if not isinstance(flt.params, dict):
+            raise SemanticError("params темы должен быть объектом")
+        return flt.params
+
+    @staticmethod
     def topic_phrases(flt: Filter) -> list[str]:
-        params = flt.params or {}
+        params = SemanticEngine._params(flt)
         phrases = []
         description = params.get("description")
-        if isinstance(description, str) and description.strip():
+        if description is not None and not isinstance(description, str):
+            raise SemanticError("description темы должен быть строкой")
+        if description:
             phrases.append(clean_text(description))
-        examples = params.get("examples") or []
+        examples = params.get("examples")
+        if examples is None:
+            examples = []
         if isinstance(examples, str):
             examples = [examples]
-        phrases += [clean_text(e) for e in examples if isinstance(e, str) and e.strip()]
-        return list(dict.fromkeys(phrases))
+        if not isinstance(examples, (list, tuple)) or any(not isinstance(e, str) for e in examples):
+            raise SemanticError("examples темы должен быть строкой или списком строк")
+        phrases += [clean_text(e) for e in examples]
+        return list(dict.fromkeys(p for p in phrases if p))
+
+    @staticmethod
+    def _aggregate(flt: Filter) -> str:
+        aggregate = SemanticEngine._params(flt).get("aggregate", "mean")
+        if aggregate not in ("mean", "max"):
+            raise SemanticError(f"aggregate темы «{flt.name}» должен быть mean или max, получено {aggregate!r}")
+        return aggregate
 
     @staticmethod
     def threshold(flt: Filter) -> float:
-        value = (flt.params or {}).get("threshold", DEFAULT_THRESHOLD)
+        value = SemanticEngine._params(flt).get("threshold", DEFAULT_THRESHOLD)
         try:
+            if isinstance(value, bool):
+                raise ValueError("логическое значение вместо числа")
             value = float(value)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise SemanticError(f"порог темы «{flt.name}» не число: {value!r}") from exc
         if not -1.0 <= value <= 1.0:
             raise SemanticError(f"порог темы «{flt.name}» вне диапазона [-1, 1]: {value}")
@@ -184,6 +290,9 @@ class SemanticEngine:
 
     def score(self, article: Article, flt: Filter) -> Optional[tuple[float, str]]:
         """(оценка, лучшая фраза темы) или None, если у статьи нет текста или у темы нет фраз."""
+        if flt.kind != "topic":
+            return None
+        aggregate = self._aggregate(flt)
         text = article_text(article, self.max_chars)
         phrases = self.topic_phrases(flt)
         if not text or not phrases:
@@ -192,24 +301,21 @@ class SemanticEngine:
         phrase_vecs = self._vectors(phrases, self.query_prefix)
         similarities = phrase_vecs @ article_vec
         best = int(np.argmax(similarities))
-        aggregate = (flt.params or {}).get("aggregate", "mean")
         if aggregate == "max":
-            return float(similarities[best]), phrases[best]
-        if aggregate != "mean":
-            raise SemanticError(f"aggregate темы «{flt.name}» должен быть mean или max, получено {aggregate!r}")
+            return float(np.clip(similarities[best], -1.0, 1.0)), phrases[best]
         centroid = phrase_vecs.mean(axis=0)
         norm = np.linalg.norm(centroid)
         score = float(centroid @ article_vec / norm) if norm else 0.0
-        return score, phrases[best]
+        return float(np.clip(score, -1.0, 1.0)), phrases[best]
 
     def match(self, article: Article, flt: Filter) -> Optional[MatchReason]:
         if flt.kind != "topic":
             return None
+        threshold = self.threshold(flt)
         result = self.score(article, flt)
         if result is None:
             return None
         score, phrase = result
-        threshold = self.threshold(flt)
         if score < threshold:
             return None
         return MatchReason(
@@ -219,11 +325,22 @@ class SemanticEngine:
 
     def rank(self, articles: Sequence[Article], flt: Filter) -> list[tuple[Article, float]]:
         """Статьи по убыванию сходства с темой, без порога: для предпросмотра и подбора порога в интерфейсе."""
+        if flt.kind != "topic":
+            return []
+        self._aggregate(flt)
+        if not self.topic_phrases(flt):
+            return []
         self.index(articles)
         scored = [(a, r[0]) for a in articles if (r := self.score(a, flt)) is not None]
         return sorted(scored, key=lambda pair: pair[1], reverse=True)
 
     def match_many(self, articles: Sequence[Article], flt: Filter) -> list[Optional[MatchReason]]:
         """Те же проверки для списка статей; недостающие векторы статей считаются одним пакетом."""
+        if flt.kind != "topic":
+            return [None for _ in articles]
+        self.threshold(flt)
+        self._aggregate(flt)
+        if not self.topic_phrases(flt):
+            return [None for _ in articles]
         self.index(articles)
         return [self.match(a, flt) for a in articles]
