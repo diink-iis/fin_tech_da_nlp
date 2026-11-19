@@ -19,6 +19,7 @@ from app.aggregator import FeedError, Poller, normalize_url, parse_feed, read_fe
 from app.channels import ChannelError, ChannelStore, channel_feed_url
 from app.engines.keyword import KeywordEngine
 from app.engines.semantic import SemanticEngine, SemanticError, from_bytes, to_bytes
+from app.ui import install_ui_routes
 
 log = logging.getLogger(__name__)
 
@@ -286,6 +287,7 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
         results=await poller.refresh_now()
         return {"feeds":[asdict(r) for r in results],"new":sum(r.new for r in results),"errors":sum(bool(r.error) for r in results)}
 
+    install_ui_routes(app)
     return app
 
 
