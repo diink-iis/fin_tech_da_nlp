@@ -269,7 +269,7 @@ SaveFn = Callable[[int, list[Article]], int]
 
 
 def refresh_feeds(feeds: Iterable[tuple[int, str]], save: SaveFn, *, max_workers: int = 8,
-                  client: Optional[httpx.Client] = None) -> list[RefreshResult]:
+                  client: Optional[httpx.Client] = None, fetcher: Optional[Callable] = None) -> list[RefreshResult]:
     """Опросить ленты параллельно и сохранить статьи.
 
     feeds — пары (feed_id, url); save(feed_id, articles) сохраняет и возвращает число новых статей.
@@ -285,7 +285,7 @@ def refresh_feeds(feeds: Iterable[tuple[int, str]], save: SaveFn, *, max_workers
         feed_id, url = feed
         result = RefreshResult(feed_id=feed_id, url=url)
         try:
-            articles = fetch_feed(url, feed_id, client=client)
+            articles = (fetcher or fetch_feed)(url, feed_id, client=client)
             result.fetched = len(articles)
             result.new = save(feed_id, articles) or 0
         except FeedError as exc:
@@ -320,11 +320,13 @@ class Poller:
     """
 
     def __init__(self, get_feeds: Callable[[], Sequence[tuple[int, str]]], save: SaveFn,
-                 interval: float = 300.0, *, client: Optional[httpx.Client] = None) -> None:
+                 interval: float = 300.0, *, client: Optional[httpx.Client] = None,
+                 fetcher: Optional[Callable] = None) -> None:
         self.get_feeds = get_feeds
         self.save = save
         self.interval = interval
         self.client = client
+        self.fetcher = fetcher
         self.last_results: list[RefreshResult] = []
         self._lock = asyncio.Lock()
         self._task: Optional[asyncio.Task] = None
@@ -333,7 +335,7 @@ class Poller:
         async with self._lock:
             feeds = list(self.get_feeds())
             self.last_results = await asyncio.to_thread(
-                refresh_feeds, feeds, self.save, client=self.client)
+                refresh_feeds, feeds, self.save, client=self.client, fetcher=self.fetcher)
             return self.last_results
 
     async def _loop(self) -> None:

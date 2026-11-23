@@ -1,11 +1,12 @@
-# Python 3.12; роль 2 (семантика). Остальные роли добавляют свои зависимости.
-numpy>=1.26
-sentence-transformers>=3.0
-# torch ставится вместе с sentence-transformers; для CPU-образа можно взять лёгкую сборку:
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Python 3.11/3.12. Единый источник зависимостей для run.sh, pyproject.toml и Docker.
+numpy>=1.26,<3.0
+sentence-transformers==6.3.0
+transformers==5.24.0
+huggingface-hub==2.4.0
+packaging>=24.0
+# torch устанавливается с sentence-transformers; Docker использует CPU-сборку.
 pymorphy3>=2.0,<3.0
-# роль 3 (агрегатор и свой канал)
 feedparser>=6.0,<7.0
-httpx>=0.27
+httpx>=0.27,<1.0
 uvicorn==0.34.0
 fastapi==0.115.6

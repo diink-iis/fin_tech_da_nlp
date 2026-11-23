@@ -8,6 +8,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -15,10 +16,10 @@ from pydantic import BaseModel, Field
 
 from app.db import NotFound, Repository
 from app.contracts import Filter
-from app.aggregator import FeedError, Poller, normalize_url, parse_feed, read_feed
+from app.aggregator import FeedError, Poller, fetch_feed, normalize_url, parse_feed, read_feed
 from app.channels import ChannelError, ChannelStore, channel_feed_url
-from app.engines.keyword import KeywordEngine
-from app.engines.semantic import SemanticEngine, SemanticError, from_bytes, to_bytes
+from app.engines.keyword import KeywordEngine, KeywordFilterError
+from app.engines.semantic import SemanticEngine, SemanticError, clean_text, from_bytes, to_bytes
 from app.ui import install_ui_routes
 
 log = logging.getLogger(__name__)
@@ -52,32 +53,34 @@ class PostIn(BaseModel):
 
 
 def _validate_filter(data: FilterIn):
-    p = data.params
-    if data.kind == "keyword":
-        if not any(p.get(k) for k in ("any", "all", "none")):
-            raise HTTPException(422, "Укажите хотя бы один из any/all/none")
-        for key in ("any", "all", "none"):
-            v = p.get(key, [])
-            if not isinstance(v, (str, list)) or (isinstance(v, list) and any(not isinstance(x, str) for x in v)):
-                raise HTTPException(422, f"{key} должен быть строкой или списком строк")
-        fields = p.get("fields", ["title", "summary"])
-        if not isinstance(fields, list) or not fields or any(f not in ("title", "summary") for f in fields):
-            raise HTTPException(422, "fields: выберите title и/или summary")
-    else:
-        desc = p.get("description", "")
-        examples = p.get("examples", [])
-        if not isinstance(desc, str) or not isinstance(examples, (str, list)) or (isinstance(examples,list) and any(not isinstance(x,str) for x in examples)):
-            raise HTTPException(422, "description/examples: ожидаются строки")
-        if not desc.strip() and not any(x.strip() for x in ([examples] if isinstance(examples,str) else examples)):
-            raise HTTPException(422, "Укажите описание темы или примеры")
-        try:
-            threshold = float(p.get("threshold", 0.45))
-        except (TypeError, ValueError):
-            raise HTTPException(422, "threshold должен быть числом")
-        if not -1 <= threshold <= 1:
-            raise HTTPException(422, "threshold должен находиться в диапазоне [-1; 1]")
-        if p.get("aggregate", "mean") not in ("mean", "max"):
-            raise HTTPException(422, "aggregate: mean или max")
+    """Normalize using the engines' own rules, before a filter can enter SQLite."""
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(422, "Укажите название фильтра")
+    params = dict(data.params)
+    flt = Filter(id=0, user_id=0, name=name, kind=data.kind, params=params)
+    try:
+        if data.kind == "keyword":
+            # Tokenization/field validation needs no model or morphology dictionary.
+            validator = KeywordEngine(lemmatizer=lambda word: word)
+            for key in ("any", "all", "none"):
+                params[key] = [term.label for term in validator._terms(params, key)]
+            params["fields"] = list(validator._fields(params))
+            if not any(params[key] for key in ("any", "all", "none")):
+                raise KeywordFilterError("Укажите хотя бы одно слово или фразу в any/all/none")
+        else:
+            if not SemanticEngine.topic_phrases(flt):
+                raise SemanticError("Укажите непустое описание темы или примеры")
+            params["description"] = clean_text(params.get("description"))
+            examples = params.get("examples") or []
+            if isinstance(examples, str):
+                examples = [examples]
+            params["examples"] = list(dict.fromkeys(clean_text(text) for text in examples if clean_text(text)))
+            params["threshold"] = SemanticEngine.threshold(flt)
+            params["aggregate"] = SemanticEngine._aggregate(flt)
+    except (KeywordFilterError, SemanticError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return data.model_copy(update={"name": name, "params": params})
 
 
 def _http_error(exc: Exception):
@@ -97,8 +100,20 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
     channels = ChannelStore(repo.path)  # same SQLite database, never a separate store
     keyword = keyword_engine if keyword_engine is not None else KeywordEngine()
     semantic = semantic_engine if semantic_engine is not None else SemanticEngine()
+    # Recover pre-migration local feeds without moving any saved news/subscriptions.
+    for channel in channels.list_channels():
+        repo.ensure_channel_feed(channel.id, channel.title)
+
+    def fetch_articles(url, feed_id, *, client=None):
+        channel_id = repo.local_channel_for_feed(feed_id)
+        if channel_id is not None:
+            # A public Docker/proxy URL need not be reachable from inside the server.
+            base_url = url.rsplit("/rss/", 1)[0]
+            return parse_feed(channels.render_rss(channel_id, base_url), url, feed_id).articles
+        return fetch_feed(url, feed_id, client=client)
+
     poller = Poller(repo.list_feed_urls, repo.save_articles,
-                    interval=float(os.getenv("RSS_POLL_SECONDS", "300")))
+                    interval=float(os.getenv("RSS_POLL_SECONDS", "300")), fetcher=fetch_articles)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -134,7 +149,7 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
         except Exception as exc: _http_error(exc)
 
     @app.post("/api/users/{user_id}/feeds", status_code=201)
-    async def subscribe_feed(user_id: int, payload: FeedIn):
+    async def subscribe_feed(user_id: int, payload: FeedIn, request: Request):
         try:
             repo.require_user(user_id)
             if payload.feed_id is not None:
@@ -145,9 +160,25 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
                 if existing:
                     feed = existing
                 else:
-                    info = await asyncio.to_thread(read_feed,url)
-                    feed = repo.add_feed(info.url,info.title)
-                    repo.save_articles(feed["id"],info.articles)
+                    parts, own = urlparse(url), urlparse(str(request.base_url))
+                    loopback = {"localhost", "127.0.0.1", "::1"}
+                    same_host = parts.hostname == own.hostname or {parts.hostname, own.hostname} <= loopback
+                    same_port = (parts.port or (443 if parts.scheme == "https" else 80)) == (own.port or (443 if own.scheme == "https" else 80))
+                    channel = None
+                    if same_host and same_port and "/rss/" in parts.path:
+                        candidate = parts.path.rsplit("/rss/", 1)[1].removesuffix(".xml")
+                        if candidate.isdecimal():
+                            local_id = int(candidate)
+                            if parts.path == urlparse(channel_feed_url(str(request.base_url), local_id)).path:
+                                channel = channels.get_channel(local_id)
+                    if channel is not None:
+                        feed = repo.ensure_channel_feed(channel.id, channel.title, url)
+                        articles = parse_feed(channels.render_rss(channel.id, str(request.base_url)), url, feed["id"]).articles
+                        repo.save_articles(feed["id"], articles)
+                    else:
+                        info = await asyncio.to_thread(read_feed,url)
+                        feed = repo.add_feed(info.url,info.title)
+                        repo.save_articles(feed["id"],info.articles)
             else:
                 raise HTTPException(422, "Передайте url или feed_id")
             repo.subscribe(user_id,feed["id"])
@@ -169,13 +200,13 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
 
     @app.post("/api/users/{user_id}/filters",status_code=201)
     def create_filter(user_id:int,payload:FilterIn):
-        _validate_filter(payload)
+        payload = _validate_filter(payload)
         try: return repo.create_filter(user_id,payload.name.strip(),payload.kind,payload.params)
         except Exception as exc: _http_error(exc)
 
     @app.put("/api/users/{user_id}/filters/{filter_id}")
     def update_filter(user_id:int,filter_id:int,payload:FilterIn):
-        _validate_filter(payload)
+        payload = _validate_filter(payload)
         try: return repo.update_filter(user_id,filter_id,payload.name.strip(),payload.kind,payload.params)
         except Exception as exc:_http_error(exc)
 
@@ -193,9 +224,33 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
         result=[]
         # Offset/limit count MATCHED news, not articles before filtering.
         matched_count=0
-        for position in range(0, 10_000, 200):
+        position = 0
+        topic_filters = [flt for flt in filters if flt.kind == "topic"]
+        while True:
             articles=repo.news_candidates(user_id,200,position)
             if not articles: break
+            if topic_filters:
+                try:
+                    can_persist = all(hasattr(semantic, attr) for attr in ("model_name", "preload", "article_vector"))
+                    if can_persist:
+                        saved = repo.get_vectors((article.id for article in articles), semantic.model_name)
+                        missing = []
+                        for article in articles:
+                            if article.id in saved:
+                                semantic.preload(article, from_bytes(saved[article.id]))
+                            else:
+                                missing.append(article)
+                    else:
+                        missing = articles
+                    if missing and hasattr(semantic, "index"):
+                        semantic.index(missing)
+                    if can_persist:
+                        for article in missing:
+                            vector = semantic.article_vector(article)
+                            if vector is not None:
+                                repo.put_vector(article.id, semantic.model_name, to_bytes(vector))
+                except (SemanticError, ValueError) as exc:
+                    raise HTTPException(422, f"Фильтр {topic_filters[0].name}: {exc}") from exc
             for article in articles:
                 reasons=[]
                 for flt in filters:
@@ -203,15 +258,7 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
                         if flt.kind=="keyword":
                             reason=keyword.match(article,flt)
                         else:
-                            # Reuse DB-stored vector after restart; model computation is lazy.
-                            if hasattr(semantic,"preload") and hasattr(semantic,"model_name"):
-                                saved=repo.get_vector(article.id,semantic.model_name)
-                                if saved is not None:
-                                    semantic.preload(article,from_bytes(saved))
                             reason=semantic.match(article,flt)
-                            if hasattr(semantic,"article_vector") and hasattr(semantic,"model_name") and repo.get_vector(article.id,semantic.model_name) is None:
-                                vector=semantic.article_vector(article)
-                                if vector is not None: repo.put_vector(article.id,semantic.model_name,to_bytes(vector))
                     except (SemanticError,ValueError) as exc:
                         raise HTTPException(422,f"Фильтр {flt.name}: {exc}") from exc
                     if reason:reasons.append(asdict(reason))
@@ -226,6 +273,7 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
                     matched_count+=1
                     if len(result)>=limit:return result
             if len(articles)<200:break
+            position += len(articles)
         return result
 
     @app.get("/api/users/{user_id}/news")
@@ -252,7 +300,8 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
         return StreamingResponse(events(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
     @app.get("/api/channels")
-    def list_channels():return [asdict(c) for c in channels.list_channels()]
+    def list_channels():
+        return [{**asdict(c), **repo.channel_feed_metadata(c.id)} for c in channels.list_channels()]
 
     @app.post("/api/channels",status_code=201)
     def create_channel(payload:ChannelIn,request:Request):
@@ -260,9 +309,9 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
             if payload.user_id is not None:repo.require_user(payload.user_id)
             ch=channels.create_channel(payload.title,payload.description)
             url=channel_feed_url(str(request.base_url),ch.id)
-            feed=repo.add_feed(url,ch.title)
+            feed=repo.ensure_channel_feed(ch.id, ch.title, url, owner_user_id=payload.user_id)
             if payload.user_id is not None:repo.subscribe(payload.user_id,feed["id"])
-            return {**asdict(ch),"rss_url":url,"feed_id":feed["id"]}
+            return {**asdict(ch),"rss_url":url,"feed_id":feed["id"],"owner_user_id":payload.user_id}
         except Exception as exc:_http_error(exc)
 
     @app.post("/api/channels/{channel_id}/articles",status_code=201)
@@ -270,7 +319,7 @@ def create_app(db_path: str | None = None, *, polling: bool = True,
         try:
             post=channels.post_article(channel_id,payload.title,payload.text,payload.link)
             url=channel_feed_url(str(request.base_url),channel_id)
-            feed=repo.add_feed(url,channels.get_channel(channel_id).title)
+            feed=repo.ensure_channel_feed(channel_id, channels.get_channel(channel_id).title, url)
             xml=channels.render_rss(channel_id,str(request.base_url))
             articles=parse_feed(xml,url,feed["id"]).articles
             inserted=repo.save_articles(feed["id"],articles)

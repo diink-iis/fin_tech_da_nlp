@@ -7,6 +7,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 from app.contracts import Article, Filter
 
@@ -23,6 +24,11 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
  feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
  PRIMARY KEY(user_id, feed_id)
+);
+CREATE TABLE IF NOT EXISTS channel_feeds (
+ channel_id INTEGER PRIMARY KEY,
+ feed_id INTEGER NOT NULL UNIQUE REFERENCES feeds(id) ON DELETE CASCADE,
+ owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS filters (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,6 +76,8 @@ class Repository:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as conn:
             conn.executescript(SCHEMA)
+            if "owner_user_id" not in {row["name"] for row in conn.execute("PRAGMA table_info(channel_feeds)")}:
+                conn.execute("ALTER TABLE channel_feeds ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
 
     @contextmanager
     def connection(self):
@@ -137,6 +145,60 @@ class Repository:
         with self.connection() as conn:
             self._require(conn,"feeds",feed_id)
             return dict(conn.execute("SELECT * FROM feeds WHERE id=?",(feed_id,)).fetchone())
+
+    def ensure_channel_feed(self, channel_id: int, title: str, url: str | None = None,
+                            owner_user_id: int | None = None) -> dict | None:
+        """Stable local-channel identity, independent of the current request Host.
+
+        When url is omitted, only recover an existing legacy feed. No articles or
+        subscriptions are moved or deleted while upgrading an existing database.
+        """
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if owner_user_id is not None:
+                self._require(conn, "users", owner_user_id)
+            row = conn.execute("""SELECT f.* FROM feeds f JOIN channel_feeds c ON c.feed_id=f.id
+                                  WHERE c.channel_id=?""", (channel_id,)).fetchone()
+            if row is not None:
+                if owner_user_id is not None:
+                    conn.execute("UPDATE channel_feeds SET owner_user_id=COALESCE(owner_user_id,?) WHERE channel_id=?",
+                                 (owner_user_id, channel_id))
+                return dict(row)
+            expected_paths = {f"/rss/{channel_id}.xml"}
+            if url:
+                expected_paths.add(urlparse(url).path)
+            requested_host = urlparse(url).hostname if url else None
+            local_hosts = {"localhost", "127.0.0.1", "::1"}
+            if requested_host:
+                local_hosts.add(requested_host)
+            candidates = []
+            for feed in conn.execute("SELECT * FROM feeds ORDER BY id"):
+                parts = urlparse(feed["url"])
+                if (parts.scheme in {"http", "https"} and parts.path in expected_paths
+                        and parts.hostname in local_hosts and feed["title"] == title):
+                    candidates.append(feed)
+            if candidates:
+                row = candidates[0]
+            elif url is not None:
+                conn.execute("INSERT OR IGNORE INTO feeds(url,title,created_at) VALUES(?,?,?)",
+                             (url, title, utcnow()))
+                row = conn.execute("SELECT * FROM feeds WHERE url=?", (url,)).fetchone()
+                self._bump(conn)
+            else:
+                return None
+            conn.execute("INSERT INTO channel_feeds(channel_id,feed_id,owner_user_id) VALUES(?,?,?)",
+                         (channel_id, row["id"], owner_user_id))
+            return dict(row)
+
+    def channel_feed_metadata(self, channel_id: int) -> dict:
+        with self.connection() as conn:
+            row = conn.execute("SELECT feed_id,owner_user_id FROM channel_feeds WHERE channel_id=?", (channel_id,)).fetchone()
+            return dict(row) if row else {"feed_id": None, "owner_user_id": None}
+
+    def local_channel_for_feed(self, feed_id: int) -> int | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT channel_id FROM channel_feeds WHERE feed_id=?", (feed_id,)).fetchone()
+            return row[0] if row else None
 
     def subscribe(self, user_id: int, feed_id: int):
         with self.connection() as conn:
@@ -225,6 +287,16 @@ class Repository:
         with self.connection() as conn:
             row=conn.execute("SELECT vector FROM article_vectors WHERE article_id=? AND model=?",(article_id,model)).fetchone()
             return row[0] if row else None
+
+    def get_vectors(self, article_ids: Iterable[int], model: str) -> dict[int, bytes]:
+        ids = list(article_ids)
+        if not ids:
+            return {}
+        with self.connection() as conn:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(f"SELECT article_id,vector FROM article_vectors WHERE model=? AND article_id IN ({placeholders})",
+                                [model, *ids])
+            return {row["article_id"]: row["vector"] for row in rows}
 
     def put_vector(self,article_id:int,model:str,vector:bytes):
         with self.connection() as conn:
